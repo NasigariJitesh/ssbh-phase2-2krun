@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Colony Run Route</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  /* Layout: full-height map on top; dock below with "now on" road, next landmark, route order, controls. */
+  :root {
+    --ground: #0f1614;
+    --surface: #17211e;
+    --line: #2a3a35;
+    --text: #eef4f1;
+    --muted: #93a79f;
+    --route: #ffcf33;      /* proposed route */
+    --here: #34d399;       /* road the runner is on */
+    --ink-on-route: #1b1600;
+    --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--ground); color: var(--text);
+    font: 15px/1.4 var(--font-body);
+    display: flex; flex-direction: column;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  button, select, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--route); outline-offset: 2px; }
+
+  /* Status bar above the map: title, current road, landmark banner. Never drawn over the map. */
+  .topbar {
+    flex: 0 0 auto; display: grid; grid-template-columns: minmax(150px, auto) minmax(170px, 240px) minmax(0, 1fr);
+    gap: 10px; align-items: stretch; padding: 10px 16px; background: var(--ground); border-bottom: 1px solid var(--line);
+  }
+  .title { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+  .title h1 { margin: 0; font: 700 22px/1 var(--font-display); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+  .title p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+  .card {
+    min-width: 0; display: flex; align-items: center; gap: 12px; border-radius: 8px; padding: 8px 14px;
+    background: #2a3a50; color: #fff; transition: background-color .25s, color .25s;
+  }
+  .card .k { color: inherit; opacity: .78; }
+  .card .big { font: 700 34px/1.05 var(--font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: .01em; }
+  .card .sub { font-size: 13px; opacity: .85; min-height: 1.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .txt { min-width: 0; flex: 1 1 auto; }
+  .card.here { background: var(--here); color: #04251a; }
+  .lmcard { background: #1f2d29; border: 1px solid var(--line); }
+  .lmcard .big { font-size: 26px; }
+  .lmcard .dot { width: 16px; height: 16px; border-radius: 50%; border: 3px solid #fff; flex: none; background: transparent; }
+  .lmcard.passing { background: var(--route); color: var(--ink-on-route); border-color: var(--route); animation: pop .5s ease-out; }
+  .lmcard.passing .dot { border-color: #1b1600; }
+  @keyframes pop { from { transform: scale(.97); box-shadow: 0 0 0 0 rgba(255,207,51,.7); } to { transform: scale(1); box-shadow: 0 0 0 12px rgba(255,207,51,0); } }
+
+  .stage { position: relative; flex: 1 1 auto; min-height: 200px; }
+  #map { position: absolute; inset: 0; background: #0b1110; }
+
+  /* Control dock: Play / Reset always visible, everything else folds away. */
+  .dock { flex: 0 0 auto; background: var(--surface); border-top: 1px solid var(--line); }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; }
+  .more { display: grid; gap: 14px; padding: 4px 16px 16px; max-height: 44vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 14px; }
+  .more[hidden] { display: none; }
+  .k { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .btns { display: flex; gap: 8px; }
+  .btn {
+    border: 1px solid var(--line); background: #1f2d29; border-radius: 6px; padding: 10px 18px; cursor: pointer;
+    font: 600 15px var(--font-body); min-width: 88px;
+  }
+  .btn.primary { background: var(--route); border-color: var(--route); color: var(--ink-on-route); min-width: 108px; }
+  .btn:hover { filter: brightness(1.12); }
+  .more-btn {
+    display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: none; border-radius: 6px;
+    padding: 10px 14px; cursor: pointer; font-size: 14px; color: var(--text);
+  }
+  .more-btn svg { width: 14px; height: 14px; transition: transform .2s; }
+  .more-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  .strip { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; margin-top: 6px; }
+  .step {
+    border: 1px solid var(--line); background: #1f2d29; border-radius: 5px; min-width: 34px; padding: 5px 9px; cursor: pointer;
+    font: 700 16px/1 var(--font-display); letter-spacing: .02em; color: var(--muted);
+  }
+  .step.done { color: var(--text); border-color: #3a554b; }
+  .step.cur { background: var(--here); color: #04251a; border-color: var(--here); }
+  .step.next { border-style: dashed; border-color: var(--here); color: var(--text); }
+  .sep { color: #4a5f58; font-size: 12px; }
+
+  .lmlist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .lmchip {
+    display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: #1f2d29; border-radius: 99px;
+    padding: 4px 11px 4px 8px; cursor: pointer; font-size: 13px; max-width: 100%;
+  }
+  .lmchip i { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; flex: none; }
+  .lmchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lmchip.passed::after { content: "\2713"; color: var(--here); font-weight: 700; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: flex-start; }
+  .field { display: grid; gap: 5px; min-width: 0; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; background: #1f2d29; padding: 8px 14px; cursor: pointer; font-size: 14px; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--route); color: var(--ink-on-route); font-weight: 600; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 16px; padding-top: 6px; }
+  .checks label { display: flex; gap: 6px; align-items: center; cursor: pointer; font-size: 14px; }
+  .checks input { accent-color: var(--route); width: 16px; height: 16px; }
+
+  /* Map glyphs */
+  .runner { position: relative; width: 22px; height: 22px; }
+  .runner i { position: absolute; inset: 3px; border-radius: 50%; background: #fff; border: 4px solid #ef4444; box-shadow: 0 1px 6px rgba(0,0,0,.6); }
+  .runner::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid #ef4444; animation: ping 1.4s ease-out infinite; }
+  @keyframes ping { from { transform: scale(.7); opacity: .9; } to { transform: scale(2.2); opacity: 0; } }
+  .arr svg { display: block; width: 13px; height: 13px; filter: drop-shadow(0 0 2px rgba(0,0,0,.85)); }
+  .sf {
+    background: #fff; color: #111; border: 3px solid #111; border-radius: 4px; width: 34px; height: 34px;
+    display: grid; place-items: center; font: 700 15px var(--font-display); letter-spacing: .02em; line-height: 1;
+    box-shadow: 0 2px 6px rgba(0,0,0,.6);
+  }
+  .lm { width: 20px; height: 20px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.7); cursor: pointer; }
+  .rtag {
+    width: max-content; transform: translate(-50%, -50%); background: #0f1614; color: #fff; border: 2px solid var(--route);
+    border-radius: 5px; padding: 3px 8px; font: 700 15px/1 var(--font-display); letter-spacing: .03em; white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,.6);
+  }
+  .rtag.cur { background: var(--here); border-color: #04251a; color: #04251a; }
+  .zoomed-out .rtag { padding: 2px 6px; font-size: 13px; }
+  .zoomed-out .rtag .w { display: none; }
+  .hide-rtags .rtag { display: none; }
+  .leaflet-tooltip.lm-label {
+    background: rgba(15,22,20,.92); color: #fff; border: 1px solid #3a4d47; border-radius: 4px; padding: 3px 8px;
+    font: 600 13px/1.2 var(--font-body); box-shadow: 0 1px 6px rgba(0,0,0,.5);
+  }
+  .leaflet-tooltip.lm-label::before { display: none; }
+  .leaflet-popup-content { font: 14px/1.4 var(--font-body); margin: 12px 14px; }
+  .leaflet-popup-content b { font: 700 17px var(--font-display); letter-spacing: .02em; }
+  .leaflet-popup-content .meta { color: #555; font-size: 12.5px; }
+  .leaflet-container { font-family: var(--font-body); }
+
+  @media (max-width: 720px) {
+    .topbar { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); padding: 8px 12px; gap: 8px; }
+    .title { display: none; }
+    .card { padding: 7px 11px; gap: 9px; }
+    .card .big { font-size: 28px; }
+    .lmcard .big { font-size: 20px; }
+    .card .sub { font-size: 12px; }
+    .two { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .bar { padding: 8px 12px; }
+    .more { padding-left: 12px; padding-right: 12px; max-height: 50vh; }
+  }
+  @media (prefers-reduced-motion: reduce) { .runner::after, .lmcard.passing { animation: none; } .card, .more-btn svg { transition: none; } }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">
+      <h1>Colony Run Route</h1>
+      <p id="badgeSub">Loading route…</p>
+    </div>
+    <div class="card" id="nowBox" role="status" aria-live="polite">
+      <div class="txt">
+        <div class="k">Now on</div>
+        <div class="big" id="nowRoad">Road –</div>
+        <div class="sub" id="nowSub">&nbsp;</div>
+      </div>
+    </div>
+    <div class="card lmcard" id="lmCard" role="status" aria-live="polite">
+      <i class="dot" id="lmDot"></i>
+      <div class="txt">
+        <div class="k" id="lmKicker">Next landmark</div>
+        <div class="big" id="nextLm">–</div>
+        <div class="sub" id="nextSub">&nbsp;</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="stage">
+    <div id="map" role="application" aria-label="Map of the colony run route"></div>
+  </div>
+
+  <section class="dock" aria-label="Run simulation controls">
+    <div class="bar">
+      <div class="btns">
+        <button type="button" class="btn primary" id="bPlay">Play</button>
+        <button type="button" class="btn" id="bReset">Reset</button>
+      </div>
+      <button type="button" class="more-btn" id="bMore" aria-expanded="false" aria-controls="more">
+        <span id="bMoreText">More controls</span>
+        <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2 5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+
+    <div class="more" id="more" hidden>
+      <div class="two">
+        <div>
+          <div class="k">Route order · tap to jump</div>
+          <div class="strip" id="order"></div>
+        </div>
+        <div>
+          <div class="k">Landmarks · tap to see</div>
+          <div class="lmlist" id="lmList"></div>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="field">
+          <span class="k">Speed</span>
+          <div class="seg" id="speedSeg" role="group" aria-label="Playback speed">
+            <button type="button" data-v="15" aria-pressed="false">Slow</button>
+            <button type="button" data-v="30" aria-pressed="true">Normal</button>
+            <button type="button" data-v="60" aria-pressed="false">Fast</button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="k">Options</span>
+          <div class="checks">
+            <label><input type="checkbox" id="oLoop"> Loop</label>
+            <label><input type="checkbox" id="oFollow"> Follow runner</label>
+            <label><input type="checkbox" id="oRoads" checked> Road labels</label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* Data exported from the drawing tool, used unchanged.
+   ROUTE: the run, one continuous line. ROADS: one straight line per numbered road.
+   LANDMARKS: point features (name, optional note, optional marker-color). */
+const ROUTE_GEOJSON = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[78.5171712,17.2980951],[78.5171039,17.2973859],[78.5170585,17.2968346],[78.5171214,17.2967578],[78.5174819,17.2967611],[78.5175274,17.2973792],[78.5175799,17.2979873],[78.5179298,17.2979673],[78.5178913,17.2973926],[78.5178808,17.2968045],[78.5182973,17.2968079],[78.5183113,17.2971621],[78.5182973,17.2979172],[78.5179613,17.2979606],[78.5179683,17.2983649],[78.5180068,17.2988427],[78.5180068,17.2991129],[78.5179383,17.2979669],[78.517716,17.2979716],[78.517581,17.2979986],[78.5176163,17.298565],[78.5176478,17.2990993],[78.517691,17.2997782],[78.5173492,17.2997857],[78.5168424,17.2998195],[78.5165124,17.2998382],[78.5160999,17.2998495],[78.5152517,17.2998888],[78.5153736,17.3012318],[78.5154352,17.3022547],[78.515788,17.3022339],[78.5157488,17.3012069],[78.5156965,17.3004916],[78.5156486,17.2998804],[78.5161059,17.2998513],[78.5161189,17.3003211],[78.5161668,17.3011819],[78.5162191,17.3021756],[78.5166328,17.3021673],[78.516598,17.301265],[78.5165806,17.3007785],[78.5165168,17.299896],[78.5164689,17.2992432],[78.5164123,17.2986403],[78.51636,17.2981704],[78.5164384,17.2980872],[78.5166997,17.298054],[78.516752,17.298582],[78.5167999,17.2994012],[78.5168391,17.2998212],[78.5172964,17.299792],[78.5172267,17.2989313],[78.5171788,17.2981621]]}}]};
+const ROADS_GEOJSON = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"Road number":3},"geometry":{"type":"LineString","coordinates":[[78.515548,17.306012],[78.515222,17.299904]]},"bbox":[78.515222,17.299904,78.515548,17.306012]},{"type":"Feature","properties":{"Road number":2},"geometry":{"type":"LineString","coordinates":[[78.515963,17.306062],[78.515587,17.299158]]},"bbox":[78.515587,17.299158,78.515963,17.306062]},{"type":"Feature","properties":{"Road number":1},"geometry":{"type":"LineString","coordinates":[[78.516458,17.305995],[78.516022,17.298776]]},"bbox":[78.516022,17.298776,78.516458,17.305995]},{"type":"Feature","properties":{"Road number":5},"geometry":{"type":"LineString","coordinates":[[78.516598,17.302199],[78.516378,17.29813]]},"bbox":[78.516378,17.29813,78.516598,17.302199]},{"type":"Feature","properties":{"Road number":6},"geometry":{"type":"LineString","coordinates":[[78.516803,17.299853],[78.516666,17.297268]]},"bbox":[78.516666,17.297268,78.516803,17.299853]},{"type":"Feature","properties":{"Road number":7},"geometry":{"type":"LineString","coordinates":[[78.517258,17.299824],[78.517038,17.296863]]},"bbox":[78.517038,17.296863,78.517258,17.299824]},{"type":"Feature","properties":{"Road number":8},"geometry":{"type":"LineString","coordinates":[[78.517646,17.299806],[78.517471,17.296794]]},"bbox":[78.517471,17.296794,78.517646,17.299806]},{"type":"Feature","properties":{"Road number":9},"geometry":{"type":"LineString","coordinates":[[78.517995,17.299169],[78.517896,17.296794]]},"bbox":[78.517896,17.296794,78.517995,17.299169]},{"type":"Feature","properties":{"Road number":10},"geometry":{"type":"LineString","coordinates":[[78.518268,17.297945],[78.518268,17.296808]]},"bbox":[78.518268,17.296808,78.518268,17.297945]}]};
+const LANDMARKS = {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"Name":"SSBH P-2 Community Hall","marker-color":"rgba(47, 130, 78, 1)","marker-size":"medium","marker-symbol":"residential-community"},"geometry":{"type":"Point","coordinates":[78.517141,17.298158]},"bbox":[78.517141,17.298158,78.517141,17.298158]},{"type":"Feature","properties":{"Name":"Park, Road Number 8","marker-color":"rgba(71, 130, 47, 1)","marker-size":"medium","marker-symbol":"park-alt1"},"geometry":{"type":"Point","coordinates":[78.517658,17.298555]},"bbox":[78.517658,17.298555,78.517658,17.298555]},{"type":"Feature","properties":{"Name":"Road Number 5 Kunta"},"geometry":{"type":"Point","coordinates":[78.516331,17.302269]},"bbox":[78.516331,17.302269,78.516331,17.302269]},{"type":"Feature","properties":{"Name":"RCI Wall","marker-color":"rgba(130, 47, 82, 1)"},"geometry":{"type":"Point","coordinates":[78.517148,17.296721]},"bbox":[78.517148,17.296721,78.517148,17.296721]},{"type":"Feature","properties":{"Name":"SSBH Arch","marker-color":"#312E81","marker-size":"medium"},"geometry":{"type":"Point","coordinates":[78.516052,17.306001]},"bbox":[78.516052,17.306001,78.516052,17.306001]}]};
+
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /* ---------- 1. Route as an ordered list of [lat, lng] ---------- */
+  function lines(g, out) {
+    if (!g) return;
+    if (g.type === 'FeatureCollection') g.features.forEach(f => lines(f.geometry, out));
+    else if (g.type === 'Feature') lines(g.geometry, out);
+    else if (g.type === 'LineString') out.push(g.coordinates);
+    else if (g.type === 'MultiLineString') g.coordinates.forEach(c => out.push(c));
+  }
+  const parts = [];
+  lines(ROUTE_GEOJSON, parts);
+  const pts = parts.flat().map(c => [c[1], c[0]]);
+
+  /* ---------- 2. Geometry helpers. Length is used only to move the runner at a steady speed; it is never shown. ---------- */
+  const R = 6371008.8, rad = Math.PI / 180;
+  function hav(a, b) {
+    const dp = (b[0] - a[0]) * rad, dl = (b[1] - a[1]) * rad;
+    const h = Math.sin(dp / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dl / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+  function bearing(a, b) {
+    const p1 = a[0] * rad, p2 = b[0] * rad, dl = (b[1] - a[1]) * rad;
+    return (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) / rad + 360) % 360;
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
+  const TOTAL = cum[cum.length - 1];
+  const isLoop = hav(pts[0], pts[pts.length - 1]) < 15;
+
+  function segIndex(d) {
+    let lo = 0, hi = cum.length - 2;
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (cum[m] <= d) lo = m; else hi = m - 1; }
+    return lo;
+  }
+  function at(d) {
+    d = Math.min(Math.max(d, 0), TOTAL);
+    const i = segIndex(d), seg = cum[i + 1] - cum[i], t = seg > 0 ? (d - cum[i]) / seg : 0;
+    return { ll: [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t], brg: bearing(pts[i], pts[i + 1]), i };
+  }
+  function slice(from, to) {
+    const out = [at(from).ll];
+    for (let i = 0; i < pts.length; i++) if (cum[i] > from && cum[i] < to) out.push(pts[i]);
+    out.push(at(to).ll);
+    return out;
+  }
+
+  /* ---------- 3. Which numbered road is each part of the route on? ----------
+     A route sample belongs to a road when it is within 14 m of that road's line
+     and runs the same way (within 35 degrees). Everything else is a cross street. */
+  const lat0 = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const kx = Math.cos(lat0 * rad) * rad * R, ky = rad * R;
+  const xy = ll => [ll[1] * kx, ll[0] * ky];
+  const P = pts.map(xy);
+  const roadSegs = [], roadLines = [];
+  (function collect(g) {
+    if (!g) return;
+    if (g.type === 'FeatureCollection') return g.features.forEach(collect);
+    if (g.type !== 'Feature' || !g.geometry || g.geometry.type !== 'LineString') return;
+    const pr = g.properties || {};
+    const id = pr['Road number'] ?? pr.road ?? pr.Road ?? pr.Name ?? pr.name;
+    if (id == null) return;
+    const c = g.geometry.coordinates.map(q => xy([q[1], q[0]]));
+    roadLines.push({ id: String(id), ll: g.geometry.coordinates.map(q => [q[1], q[0]]) });
+    for (let i = 0; i < c.length - 1; i++) roadSegs.push({ id: String(id), a: c[i], b: c[i + 1] });
+  })(ROADS_GEOJSON);
+
+  function classify(q, v) {
+    let best = null;
+    for (const s of roadSegs) {
+      const dx = s.b[0] - s.a[0], dy = s.b[1] - s.a[1], L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, ((q[0] - s.a[0]) * dx + (q[1] - s.a[1]) * dy) / L2)) : 0;
+      const d = Math.hypot(q[0] - s.a[0] - t * dx, q[1] - s.a[1] - t * dy);
+      const cos = Math.abs(dx * v[0] + dy * v[1]) / ((Math.hypot(dx, dy) * Math.hypot(v[0], v[1])) || 1);
+      if (d <= 14 && Math.acos(Math.min(1, cos)) / rad <= 35 && (!best || d < best.d)) best = { d, id: s.id };
+    }
+    return best ? best.id : null;
+  }
+
+  let runs = [];
+  for (let s = 1; s < TOTAL; s += 2) {
+    const a = at(s), v = [P[a.i + 1][0] - P[a.i][0], P[a.i + 1][1] - P[a.i][1]];
+    const road = classify(xy(a.ll), v), last = runs[runs.length - 1];
+    if (last && last.road === road) last.to = s + 1; else runs.push({ road, from: s - 1, to: s + 1 });
+  }
+  runs[0].from = 0; runs[runs.length - 1].to = TOTAL;
+  // Ignore very short matches (a corner clipping a road) and join neighbours that now agree.
+  runs.forEach(r => { if (r.road && r.to - r.from < 10) r.road = null; });
+  runs = runs.reduce((out, r) => {
+    const last = out[out.length - 1];
+    if (last && last.road === r.road) last.to = r.to; else out.push({ ...r });
+    return out;
+  }, []);
+  // Cross streets are described by the numbered roads on either side.
+  runs.forEach((r, i) => {
+    if (r.road) return;
+    const prev = runs.slice(0, i).reverse().find(x => x.road), next = runs.slice(i + 1).find(x => x.road);
+    r.between = [prev ? prev.road : next && next.road, next ? next.road : prev && prev.road];
+  });
+  const stretchIndex = pos => { for (let i = 0; i < runs.length; i++) if (pos < runs[i].to) return i; return runs.length - 1; };
+  const roadAt = pos => runs[stretchIndex(pos)].road;
+
+  /* ---------- 4. Map ---------- */
+  const map = L.map('map', { zoomControl: false, maxZoom: 21, zoomSnap: 0.5 });
+  L.control.zoom({ position: 'bottomleft' }).addTo(map);
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxNativeZoom: 19, maxZoom: 21, attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
+  });
+  sat.addTo(map);
+
+  L.polyline(pts, { color: '#000', weight: 9, opacity: .55, lineJoin: 'round' }).addTo(map);
+  L.polyline(pts, { color: '#ffcf33', weight: 5, lineJoin: 'round' }).addTo(map);
+  const here = L.polyline([], { color: '#000', weight: 11, opacity: .6, lineJoin: 'round' }).addTo(map);
+  const hereTop = L.polyline([], { color: '#34d399', weight: 6, lineJoin: 'round' }).addTo(map);
+
+  const bounds = L.latLngBounds(pts);
+  const fit = () => map.fitBounds(bounds, { padding: [48, 48] });
+  fit();
+
+  const arrowSvg = '<svg viewBox="0 0 14 14"><path d="M7 1 L12.5 12 L7 9.2 L1.5 12 Z" fill="#fff" stroke="#111" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+  for (let d = 45; d < TOTAL - 25; d += 100) {
+    const p = at(d);
+    L.marker(p.ll, { interactive: false, keyboard: false, icon: L.divIcon({ className: 'arr', iconSize: [13, 13], iconAnchor: [6, 6],
+      html: `<div style="transform:rotate(${p.brg.toFixed(0)}deg)">${arrowSvg}</div>` }) }).addTo(map);
+  }
+
+  L.marker(pts[0], { zIndexOffset: 400, title: isLoop ? 'Start and finish' : 'Start',
+    icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 17], html: `<div class="sf">${isLoop ? 'S/F' : 'S'}</div>` }) }).addTo(map);
+  if (!isLoop) L.marker(pts[pts.length - 1], { zIndexOffset: 400, title: 'Finish',
+    icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 17], html: '<div class="sf">F</div>' }) }).addTo(map);
+
+  // One road-number tag per road, placed on its longest stretch of the route.
+  const tags = {};
+  [...new Set(runs.filter(r => r.road).map(r => r.road))].forEach(id => {
+    const longest = runs.filter(r => r.road === id).sort((a, b) => (b.to - b.from) - (a.to - a.from))[0];
+    tags[id] = L.marker(at((longest.from + longest.to) / 2).ll, { interactive: false, keyboard: false, zIndexOffset: 200,
+      icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<div class="rtag"><span class="w">Road </span>${esc(id)}</div>` }) }).addTo(map);
+  });
+
+  /* ---------- 5. Landmarks, and where the route passes each one ---------- */
+  const lmFeatures = [];
+  (function collect(g) {
+    if (!g) return;
+    if (g.type === 'FeatureCollection') g.features.forEach(collect);
+    else if (g.type === 'Feature' && g.geometry && g.geometry.type === 'Point') lmFeatures.push(g);
+  })(LANDMARKS);
+
+  function findPasses(ll) {
+    const out = []; let best = null;
+    for (let s = 0; s <= TOTAL; s += 2) {
+      const d = hav(at(s).ll, ll);
+      if (d <= 30) { if (!best || d < best.d) best = { pos: s, d }; }
+      else if (best) { out.push(best); best = null; }
+    }
+    if (best) out.push(best);
+    return out.filter(p => p.pos > 25); // the pass right at the start is not an upcoming event
+  }
+
+  const midLng = (bounds.getWest() + bounds.getEast()) / 2;
+  const lms = lmFeatures.map(f => {
+    const pr = f.properties || {};
+    const ll = [f.geometry.coordinates[1], f.geometry.coordinates[0]];
+    const l = { name: pr.Name || pr.name || pr.title || 'Landmark', note: pr.note || pr.description || '',
+      color: pr['marker-color'] || '#60a5fa', ll, passes: findPasses(ll) };
+    l.where = (() => {
+      if (l.passes.length) {
+        const r = runs[stretchIndex(l.passes[0].pos)];
+        return r.road ? `On Road ${r.road}` : `Between Road ${r.between[0]} and Road ${r.between[1]}`;
+      }
+      const q = xy(ll); let nr = null;
+      for (const s of roadSegs) {
+        const dx = s.b[0] - s.a[0], dy = s.b[1] - s.a[1], L2 = dx * dx + dy * dy;
+        const u = L2 ? Math.max(0, Math.min(1, ((q[0] - s.a[0]) * dx + (q[1] - s.a[1]) * dy) / L2)) : 0;
+        const d = Math.hypot(q[0] - s.a[0] - u * dx, q[1] - s.a[1] - u * dy);
+        if (!nr || d < nr.d) nr = { d, id: s.id };
+      }
+      return nr && nr.d <= 40 ? `Not on this route, near Road ${nr.id}` : 'Not on this route';
+    })();
+    const east = ll[1] >= midLng, nearStart = hav(ll, pts[0]) < 40;
+    l.marker = L.marker(ll, { zIndexOffset: nearStart ? 250 : 350, title: l.name,
+      icon: L.divIcon({ className: '', iconSize: [20, 20], iconAnchor: [10, 10], html: `<div class="lm" style="background:${esc(l.color)}"></div>` }) })
+      .bindTooltip(esc(l.name), { permanent: true, direction: east ? 'right' : 'left', offset: [east ? (nearStart ? 28 : 12) : (nearStart ? -28 : -12), 0], className: 'lm-label' })
+      .bindPopup(`<b>${esc(l.name)}</b>${l.note ? '<br>' + esc(l.note) : ''}<br><span class="meta">${esc(l.where)}</span>`)
+      .addTo(map);
+    return l;
+  });
+  const events = lms.flatMap(l => l.passes.map(p => ({ lm: l, pos: p.pos, hit: false }))).sort((a, b) => a.pos - b.pos);
+
+  /* ---------- 6. Runner ---------- */
+  const runner = L.marker(pts[0], { zIndexOffset: 1000, interactive: false, keyboard: false,
+    icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11], html: '<div class="runner"><i></i></div>' }) }).addTo(map);
+
+  /* ---------- 7. Dock ---------- */
+  const steps = []; // route-order chips (numbered stretches only)
+  const order = $('order');
+  runs.forEach((r, i) => {
+    if (!r.road) return;
+    if (steps.length) { const s = document.createElement('span'); s.className = 'sep'; s.textContent = '›'; order.appendChild(s); }
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'step'; b.textContent = r.road; b.title = 'Jump to Road ' + r.road;
+    b.onclick = () => seek(r.from + 1);
+    order.appendChild(b); steps.push({ el: b, i });
+  });
+  const lmList = $('lmList');
+  lms.forEach(l => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'lmchip';
+    b.innerHTML = `<i style="background:${esc(l.color)}"></i><span>${esc(l.name)}</span>`;
+    b.onclick = () => { map.flyTo(l.ll, Math.max(map.getZoom(), 18), { duration: .6 }); l.marker.openPopup(); };
+    lmList.appendChild(b); l.chip = b;
+  });
+
+  const S = { pos: 0, playing: false, lap: 1, last: 0, speed: 30, finished: false, si: -1, flash: null };
+  // Landmark banner: shows the next landmark, and turns yellow for a few seconds when the runner passes one.
+  let flashTimer;
+  function flash(lm) {
+    S.flash = lm; showNext(events.find(e => e.pos > S.pos));
+    clearTimeout(flashTimer); flashTimer = setTimeout(() => { S.flash = null; showNext(events.find(e => e.pos > S.pos)); }, 3500);
+  }
+  function showNext(nxt) {
+    const f = S.flash;
+    $('lmCard').classList.toggle('passing', !!f);
+    if (f) { $('lmKicker').textContent = 'Passing now'; $('nextLm').textContent = f.name; $('nextSub').textContent = f.where; $('lmDot').style.background = f.color; }
+    else if (nxt) { $('lmKicker').textContent = 'Next landmark'; $('nextLm').textContent = nxt.lm.name; $('nextSub').textContent = nxt.lm.where; $('lmDot').style.background = nxt.lm.color; }
+    else {
+      $('lmKicker').textContent = S.finished ? 'Finished' : 'Next landmark';
+      $('nextLm').textContent = S.finished ? 'Run complete' : 'None left';
+      $('nextSub').textContent = isLoop && !S.finished ? 'Back to the start next' : '\u00a0';
+      $('lmDot').style.background = 'transparent';
+    }
+  }
+
+  function showStretch() {
+    const r = runs[S.si];
+    $('nowRoad').textContent = r.road ? `Road ${r.road}` : 'Cross street';
+    $('nowBox').classList.toggle('here', !!r.road);
+    $('nowSub').textContent = r.road ? '' : (r.between[0] === r.between[1] ? `Beside Road ${r.between[0]}` : `Road ${r.between[0]} to Road ${r.between[1]}`);
+    const lap = S.lap > 1 ? `Lap ${S.lap}` : '';
+    if (!r.road) $('nowSub').textContent += (lap && ' · ' + lap);
+    else $('nowSub').textContent = lap || ' ';
+    here.setLatLngs(slice(r.from, r.to)); hereTop.setLatLngs(slice(r.from, r.to));
+    Object.entries(tags).forEach(([id, m]) => { const e = m.getElement(); if (e) e.firstChild.classList.toggle('cur', id === r.road); });
+    const nextStep = r.road ? -1 : steps.findIndex(s => s.i > S.si);
+    steps.forEach((s, k) => {
+      s.el.classList.toggle('cur', s.i === S.si);
+      s.el.classList.toggle('done', s.i < S.si);
+      s.el.classList.toggle('next', k === nextStep);
+    });
+  }
+
+  function render() {
+    const p = at(S.pos);
+    runner.setLatLng(p.ll);
+    const si = stretchIndex(S.pos);
+    if (si !== S.si) { S.si = si; showStretch(); }
+
+    events.forEach(e => {
+      const hit = S.pos >= e.pos;
+      if (hit !== e.hit) {
+        e.hit = hit;
+        if (hit && S.playing) flash(e.lm);
+      }
+    });
+    lms.forEach(l => l.chip.classList.toggle('passed', l.passes.length > 0 && S.pos >= l.passes[0].pos));
+    if (!S.flash) showNext(events.find(e => e.pos > S.pos));
+    if (S.playing && $('oFollow').checked) map.panTo(p.ll, { animate: false });
+  }
+
+  function frame(now) {
+    if (!S.playing) return;
+    const dt = Math.min((now - S.last) / 1000, 0.1); S.last = now;
+    S.pos += dt * S.speed;
+    if (S.pos >= TOTAL) {
+      if ($('oLoop').checked) { S.pos -= TOTAL; S.lap++; S.si = -1; }
+      else { S.pos = TOTAL; S.finished = true; setPlaying(false); render(); return; }
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+  function setPlaying(on) {
+    S.playing = on;
+    $('bPlay').textContent = on ? 'Pause' : (S.finished ? 'Replay' : S.pos > 0 ? 'Resume' : 'Play');
+    if (on) {
+      if (S.finished) reset(false);
+      if ($('oFollow').checked) map.setView(at(S.pos).ll, Math.max(map.getZoom(), 18), { animate: false });
+      S.last = performance.now(); requestAnimationFrame(frame);
+    }
+  }
+  function reset(stop = true) {
+    S.pos = 0; S.lap = 1; S.finished = false; S.si = -1; S.flash = null; clearTimeout(flashTimer);
+    if (stop) setPlaying(false);
+    $('bPlay').textContent = 'Play';
+    render(); if (!$('oFollow').checked) fit();
+  }
+  function seek(pos) {
+    S.pos = Math.min(Math.max(pos, 0), TOTAL - 1); S.finished = false; S.si = -1;
+    render();
+    if (!S.playing) $('bPlay').textContent = 'Resume';
+    if ($('oFollow').checked || S.playing) map.panTo(at(S.pos).ll, { animate: true });
+  }
+
+  $('bMore').onclick = () => {
+    const open = $('more').hidden;
+    $('more').hidden = !open;
+    $('bMore').setAttribute('aria-expanded', open);
+    $('bMoreText').textContent = open ? 'Hide controls' : 'More controls';
+    requestAnimationFrame(() => map.invalidateSize());
+  };
+  $('bPlay').onclick = () => setPlaying(!S.playing);
+  $('bReset').onclick = () => reset(true);
+  $('speedSeg').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    S.speed = Number(b.dataset.v);
+    [...$('speedSeg').children].forEach(x => x.setAttribute('aria-pressed', x === b));
+  };
+  $('oFollow').onchange = e => { if (e.target.checked) map.setView(at(S.pos).ll, Math.max(map.getZoom(), 18), { animate: true }); else fit(); };
+  $('oRoads').onchange = e => map.getContainer().classList.toggle('hide-rtags', !e.target.checked);
+  document.addEventListener('keydown', ev => {
+    if (ev.target.closest && ev.target.closest('input, select, button')) return;
+    if (ev.code === 'Space') { ev.preventDefault(); setPlaying(!S.playing); }
+    if (ev.key === 'r' || ev.key === 'R') reset(true);
+  });
+  window.addEventListener('resize', () => map.invalidateSize());
+  const syncZoom = () => map.getContainer().classList.toggle('zoomed-out', map.getZoom() < 17.5);
+  map.on('zoomend', syncZoom);
+
+  $('badgeSub').textContent = `${isLoop ? 'Closed loop' : 'One way'} · ${Object.keys(tags).length} roads · ${lms.length} landmarks`;
+  reset(true); syncZoom();
+  requestAnimationFrame(() => { map.invalidateSize(); if (!$('oFollow').checked) fit(); });
+  window.__sim = { stretches: runs.map(r => [r.road, r.road ? null : r.between.join('>'), Math.round(r.from), Math.round(r.to)]),
+    events: events.map(e => [e.lm.name, Math.round(e.pos)]), lms: lms.map(l => [l.name, l.where]), total: TOTAL };
+})();
+</script>
+</body>
+</html>
